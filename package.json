@@ -1,0 +1,65 @@
+{
+  "name": "@petiole/sdk",
+  "version": "0.1.0",
+  "description": "The Petiole API from TypeScript: models that find leaves in a photo, and workflows that measure them.",
+  "license": "MIT",
+  "author": "Petiole <support@petioleapp.com>",
+  "homepage": "https://platform.petiole.pro/docs/en",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getpetiole/petiole-sdk-typescript.git"
+  },
+  "bugs": {
+    "url": "https://github.com/getpetiole/petiole-sdk-typescript/issues"
+  },
+  "keywords": [
+    "petiole",
+    "plants",
+    "leaf area",
+    "computer vision",
+    "api",
+    "sdk"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "node": "./dist/node.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "generate": "orval --config orval.config.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:contract": "vitest run --config vitest.contract.config.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && tsc -p tsconfig.node.json",
+    "check:browser": "node scripts/check-browser-entry.mjs",
+    "quickstart": "node examples/quickstart.mjs",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build && npm run check:browser"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "orval": "8.46.0",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0",
+    "yaml": "2.9.1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

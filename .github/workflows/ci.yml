@@ -1,0 +1,70 @@
+# ci: on every push and pull request, the core regenerated from
+# openapi.yaml and compared; the types and unit tests; the build, the
+# browser entry's imports and the package's files; the contract tests
+# against a mock of the spec that Prism serves; and the unit tests and the
+# built package on Node 22, the oldest the package supports. No secret.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Core, types, tests, build, contract tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # Prism, for the contract tests, needs 24.18 or later.
+          node-version: "24"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Check the core is the spec's
+        run: |
+          npm run generate
+          changed=$(git status --porcelain -- src/generated)
+          if [[ -n $changed ]]; then
+            echo "$changed"
+            echo "src/generated is not what openapi.yaml generates: run npm run generate and commit it." >&2
+            exit 1
+          fi
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run check:browser
+      - name: The package's files
+        run: npm pack --dry-run
+      - run: npm run test:contract
+
+  node22:
+    name: Unit tests and the built package on Node 22
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+      - name: The built entries load
+        run: |
+          node --input-type=module -e '
+            import { Petiole, verifyWebhook, VERSION } from "@petiole/sdk";
+            import { imageFromPath } from "@petiole/sdk/node";
+            new Petiole({ apiKey: "ptl_test_x" });
+            if (typeof verifyWebhook !== "function" || typeof imageFromPath !== "function") process.exit(1);
+            console.log(`@petiole/sdk ${VERSION} loads on Node ${process.versions.node}`);
+          '

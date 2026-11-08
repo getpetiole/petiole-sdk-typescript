@@ -1,0 +1,2771 @@
+openapi: 3.1.0
+info:
+  title: Sauron API
+  summary: "Measure plants in photos: leaf area and more, by workflow."
+  description: |
+    Runs an image through a workflow, a measurement such as leaf area, and returns the objects it measured, with their units and outlines.
+
+    An analysis is asynchronous. Send the image, through an upload or in the request, with `POST /v1/analyses`; follow it with `GET /v1/analyses/{id}`, or receive its webhook; then read `GET /v1/analyses/{id}/result`. A photo the workflow cannot measure, such as one without the calibration pad, ends `cancelled` with a `code` that says why: a result to handle, not an error.
+
+    Conventions:
+
+    - Authenticate with an API key, `Authorization: Bearer ptl_live_…`.
+    - Every id is a prefix and a ULID (`ana_`, `upl_`, `key_`, `whd_`, `org_`, `user_`), so ids sort by when they were made.
+    - Every list is `{ "object": "list", "data": [...], "hasMore": … }`, paged with `limit` and `startingAfter`.
+    - Every error is `application/problem+json` with a `code` and the `requestId`.
+    - Every response carries `request-id`; a response to a request with a key or a user's session carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`.
+    - Every `POST` of `/v1` takes an `Idempotency-Key`.
+    - A `traceparent` header (W3C Trace Context) is taken, and puts the request in the trace.
+    - Names are camelCase; times are RFC 3339 in UTC.
+  contact:
+    name: Petiole
+    url: https://docs.petiole.pro/
+  version: "1"
+servers:
+  - url: https://api.petiole.pro
+    description: Production
+  - url: https://api-staging.petiole.pro
+    description: Staging, with `ptl_test_` keys
+paths:
+  /v1/uploads:
+    post:
+      tags:
+        - Uploads
+      summary: Create an upload
+      description: |-
+        Makes a signed URL to PUT one image to, with the content type and the
+        size given here. PUT the image to `url` with `headers`, then make
+        analyses of it with `POST /v1/analyses`. The image is kept for a day.
+        An upload suits large images and mobile clients; a small image can go in
+        `POST /v1/analyses` itself.
+
+        The type must be one a workflow the key may use takes, and the size no
+        larger than the largest of theirs; `POST /v1/analyses` checks the image
+        against its own workflow.
+      operationId: createUpload
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+          description: "Makes the request safe to retry: for 24 hours the same key returns what the first request made, and with a different request is refused with `idempotency_key_mismatch`. A UUID per request does."
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUpload"
+      responses:
+        "201":
+          description: The upload, with the URL to PUT the image to.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Upload"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/RequestEntityTooLarge"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/analyses:
+    post:
+      tags:
+        - Analyses
+      summary: Create an analysis
+      description: |-
+        Runs an image through a workflow. As JSON, the image is an upload's
+        (`POST /v1/uploads`), and one upload can be analysed any number of times
+        and under several workflows. As `multipart/form-data`, the image is in
+        the request, for small images.
+
+        The analysis is asynchronous: the response says it was accepted, and
+        `links` where to follow it. Its events go to `webhookUrl`, or to the
+        organisation's webhook endpoint.
+
+        The image's type is told by its first bytes, and must be one the
+        workflow takes, no larger than its limit (`GET /v1/workflows`). An image
+        of the right type that does not decode is not refused here: its
+        analysis ends `cancelled` with `invalid_image`.
+
+        The daily quota counts the analyses that ended today, UTC, as
+        `GET /v1/usage` does: the key's own limit when it has one, and the
+        organisation's; past it, `429 quota_exceeded` with `Retry-After` at the
+        next midnight UTC. The organisation's analyses that have not ended are
+        capped too: past it, `429 concurrency_limit_exceeded`. A repeat with an
+        `Idempotency-Key` answers what the first did and is counted once.
+      operationId: createAnalysis
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+          description: "Makes the request safe to retry: for 24 hours the same key returns what the first request made, and with a different request is refused with `idempotency_key_mismatch`. A UUID per request does."
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "202":
+          description: The analysis was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisCreated"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/RequestEntityTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAnalysis"
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/CreateAnalysisForm"
+    get:
+      tags:
+        - Analyses
+      summary: List analyses
+      description: |-
+        The analyses of the organisation, newest first, of the workflows the
+        key may use. `from` and `to` are to the millisecond, and a time without
+        a zone is UTC. An analysis is listed from when it is created; its
+        status here may trail `GET /v1/analyses/{id}` by a moment.
+      operationId: listAnalyses
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: workflow
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Only this workflow's analyses.
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/Status"
+          description: Only analyses with this status.
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Only analyses created at or after this time.
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Only analyses created before this time.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            maximum: 100
+            minimum: 1
+            default: 10
+          description: How many to return, from 1 to 100.
+        - name: startingAfter
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: ^ana_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: "The page after this analysis: the last id of the page before."
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: A page of analyses.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisList"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/analyses/{id}:
+    get:
+      tags:
+        - Analyses
+      summary: Get an analysis
+      description: |-
+        An analysis's status: where it is, the step running, and how it
+        ended; with its timeline, every status it has had, and once it has
+        ended how long each step took. Another organisation's analysis is not
+        found, nor one of a workflow the key may not use.
+      operationId: getAnalysis
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: ^ana_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+            examples:
+              - ana_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+          description: The analysis's id.
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: The analysis.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisDetail"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      tags:
+        - Analyses
+      summary: Delete an analysis
+      description: |-
+        Deletes the analysis's image, its result and its status, once it has
+        ended; after that it is not found, and is not listed. An analysis that
+        has not ended, one that is queued or running, or a failed attempt about
+        to be retried, is refused with `analysis_not_ended`. The upload it was
+        made of, if any, expires on its own a day after it was made.
+      operationId: deleteAnalysis
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: ^ana_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+            examples:
+              - ana_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+          description: The analysis's id.
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "202":
+          description: The analysis is being deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedAnalysis"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/analyses/{id}/result:
+    get:
+      tags:
+        - Analyses
+      summary: Get an analysis's result
+      description: |-
+        The outcome of an analysis that has ended, `200`: the manifest of a
+        succeeded one, with signed URLs to its files valid for 15 minutes, or
+        the code and reason of a cancelled or failed one. While it runs, `202`
+        with its status; a failed attempt that is retried has not ended. Read
+        the result when it is needed rather than on every poll: the URLs are
+        made for each request. A result is kept 30 days, and is not found
+        after that.
+      operationId: getAnalysisResult
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: ^ana_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+            examples:
+              - ana_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+          description: The analysis's id.
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: "The analysis has ended: its outcome."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisResult"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "202":
+          description: "The analysis has not ended: its status only."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisResult"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/workflows:
+    get:
+      tags:
+        - Workflows
+      summary: List workflows
+      description: |-
+        The workflows the API key may use: what each takes, the object types
+        its results hold, and the version of its measurement. In order of id.
+      operationId: listWorkflows
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            maximum: 100
+            minimum: 1
+            default: 10
+          description: How many to return, from 1 to 100.
+        - name: startingAfter
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "The page after this workflow: the last id of the page before."
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: The workflows.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowList"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/object-types:
+    get:
+      tags:
+        - Object types
+      summary: Get the object-types registry
+      description: |-
+        Every object type a result can hold, with its properties, their types
+        and their units: what a result's `objects` mean. A result's
+        `objectTypesRegistryVersion` is this registry's `version`.
+      operationId: getObjectTypes
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: The registry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectTypesRegistry"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/models:
+    get:
+      tags:
+        - Models
+      summary: List models
+      description: |-
+        The models the workflows the API key may use run: what each finds,
+        its task, and the weights it runs now. In order of id.
+      operationId: listModels
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            maximum: 100
+            minimum: 1
+            default: 10
+          description: How many to return, from 1 to 100.
+        - name: startingAfter
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "The page after this model: the last id of the page before."
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: The models.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelList"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/models/{id}:
+    get:
+      tags:
+        - Models
+      summary: Get a model
+      description: |-
+        A model, with the workflows the API key may use that run it. A model
+        none of them runs is not found.
+      operationId: getModel
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 100
+            pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*$
+            examples:
+              - leaf-detector
+          description: The model's id.
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: The model.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelDetail"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/models/{id}/predictions:
+    post:
+      tags:
+        - Models
+      summary: Make a prediction
+      description: |-
+        Runs one model over one image and answers what it found, in the
+        request: labels, scores, boxes and, for a segmenter, outlines, in
+        fractions of the image as it is shown upright. A model finds; it
+        measures nothing: measurements are a workflow's analyses.
+
+        As JSON, the image is an upload's (`POST /v1/uploads`); as
+        `multipart/form-data`, it is in the request. JPEG or PNG, at most 20 MiB
+        and 100 million pixels; it is turned upright and given to the model at
+        most 25 million pixels. A model that outlines what it is given
+        (`sam2-small`) takes `boxes`, such as a detector's.
+
+        A model that is not running starts first, which takes up to a minute:
+        past the request's time, `503 model_starting` with `Retry-After`, and
+        the request can be sent again. `GET /v1/models/{id}/status` says whether
+        it is running, and starts it. A model that runs only in its workflows is
+        `409 model_not_callable`. The predictions of a day, UTC, are counted
+        against the organisation's `predictionsPerDay`: past it, `429
+        quota_exceeded`. A repeat with an `Idempotency-Key` answers what the
+        first did and is counted once.
+      operationId: createPrediction
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 100
+            pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*$
+            examples:
+              - leaf-detector
+          description: The model's id.
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+          description: "Makes the request safe to retry: for 24 hours the same key returns what the first request made, and with a different request is refused with `idempotency_key_mismatch`. A UUID per request does."
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: What the model found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Prediction"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/RequestEntityTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePrediction"
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/CreatePredictionForm"
+  /v1/models/{id}/status:
+    get:
+      tags:
+        - Models
+      summary: Get a model's status
+      description: |-
+        Whether the model can answer a prediction now: `ready`; `starting`,
+        waking from idle, which takes up to a minute; or `unavailable`. Asking
+        starts a model that is not running, so a client can ask as it shows the
+        model, and the model is awake by the time a photo is chosen. A model
+        that runs only in its workflows is `unavailable` here.
+      operationId: getModelStatus
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 100
+            pattern: ^[a-z][a-z0-9]*(-[a-z0-9]+)*$
+            examples:
+              - leaf-detector
+          description: The model's id.
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: Whether the model can answer now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelStatus"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /v1/usage:
+    get:
+      tags:
+        - Usage
+      summary: Get usage
+      description: |-
+        The analyses that ended in a range of days, both included, by day,
+        workflow and outcome: an API key's own, or, for a user of the platform
+        app, the whole organisation's. Days and workflows with none are left
+        out. The range is at most 92 days. The daily quota counts the same
+        analyses.
+      operationId: getUsage
+      security:
+        - apiKey: []
+        - user: []
+      parameters:
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: The first day, in UTC; default 30 days before `to`.
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: The last day, in UTC; default today.
+        - name: Petiole-Organisation
+          in: header
+          required: false
+          schema:
+            examples:
+              - org_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+            type: string
+          description: With a user's session, which of their organisations the request acts for; by default their one organisation that is not Personal, else their Personal one. A key acts for its own and ignores it.
+      responses:
+        "200":
+          description: The usage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Usage"
+          headers:
+            request-id:
+              $ref: "#/components/headers/RequestId"
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+webhooks:
+  analysisEvent:
+    post:
+      tags:
+        - Webhooks
+      summary: An analysis's event
+      description: |-
+        Sent to the analysis's `webhookUrl`, or else the organisation's
+        webhook endpoint, when the analysis ends, and when it starts if the
+        organisation asked for that. An answer other than 2xx, or none, is
+        retried with backoff for 24 hours, so the same event can arrive more
+        than once: its `id` tells.
+      operationId: analysisEvent
+      parameters:
+        - description: "`t=<unix seconds>,v1=<hex HMAC-SHA256 of the secret over t, a dot and the raw body>`. After a secret is rotated, one `v1=` per secret for 24 hours. Refuse a `t` more than five minutes old."
+          required: true
+          schema:
+            type: string
+            examples:
+              - t=1760692351,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd
+          name: X-Sauron-Signature
+          in: header
+        - description: The delivery's id, the event's `id`.
+          required: true
+          schema:
+            type: string
+          name: X-Sauron-Delivery
+          in: header
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalysisEvent"
+        required: true
+      responses:
+        "204":
+          description: Any 2xx answer acknowledges the event.
+components:
+  schemas:
+    Analysis:
+      properties:
+        id:
+          type: string
+          description: "The analysis's id: `ana_` and a ULID."
+        object:
+          type: string
+          const: analysis
+          default: analysis
+        workflow:
+          type: string
+          description: The workflow the image runs through.
+        apiKeyId:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The key that submitted the analysis, or null when a user of the platform app did.
+        userId:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The platform app's user who submitted the analysis, or null when a key did.
+        metadata:
+          description: The `metadata` given at submission, as it was sent.
+        status:
+          $ref: "#/components/schemas/Status"
+          description: "`created` and `queued` before the analysis starts, `started` and `running` while it runs, then `succeeded`; `cancelled`, a domain outcome such as a photo without the calibration pad, named by `code`; or `failed`, a technical failure."
+        final:
+          type: boolean
+          description: Whether no status follows. A `failed` attempt that is retried is not final, so wait for the final status before treating an analysis as failed.
+        step:
+          anyOf:
+            - $ref: "#/components/schemas/Step"
+            - type: "null"
+          description: The step running, on a terminal status the last that ran; null before the first.
+        code:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: "Why the analysis was cancelled or failed: a domain code of the workflow, such as `no_markers` or `invalid_image`, or a technical code, such as `model_unavailable`."
+        reason:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: What `code` says, in words.
+        attempt:
+          type: integer
+          description: The attempt the status belongs to, from 1; 0 before the first.
+        maxAttempts:
+          anyOf:
+            - type: integer
+            - type: "null"
+          description: How many attempts the analysis may take, or null when not known.
+        fingerprint:
+          type: string
+          description: The version of the input the status belongs to; empty before it is queued.
+        queuedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+          description: When the analysis was queued.
+        startedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+          description: When its current attempt started.
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the status last changed.
+        finishedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+          description: When the analysis reached a terminal status.
+        result:
+          anyOf:
+            - $ref: "#/components/schemas/Result"
+            - type: "null"
+          description: Where the result of a succeeded analysis went; null otherwise.
+      type: object
+      required:
+        - id
+        - object
+        - workflow
+        - apiKeyId
+        - userId
+        - metadata
+        - status
+        - final
+        - step
+        - code
+        - reason
+        - attempt
+        - maxAttempts
+        - fingerprint
+        - queuedAt
+        - startedAt
+        - updatedAt
+        - finishedAt
+        - result
+      title: Analysis
+      description: |-
+        The public projection of the status document, in the API's words: the
+        job is an analysis, the job id is its id, and the profile is the workflow
+        (M14-T2). It leaves out what is the platform's own: the tenant and the
+        consumer, the execution, the image digest and the retained files.
+
+        The field descriptions are the API's documentation (openapi.yaml of
+        services/sauron-api), written for its readers. The schema is the one the
+        API serialises, so object, which has a default, is required in it.
+    AnalysisCreated:
+      properties:
+        id:
+          type: string
+          pattern: ^ana_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: "The analysis's id: `ana_` and a ULID."
+          examples:
+            - ana_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+        object:
+          type: string
+          const: analysis
+          default: analysis
+        workflow:
+          type: string
+          description: The workflow the image runs through.
+          examples:
+            - leaf_area_v1
+        status:
+          $ref: "#/components/schemas/Status"
+          description: The analysis's status when it was accepted.
+        createdAt:
+          type: string
+          format: date-time
+          description: When the analysis was accepted.
+        links:
+          $ref: "#/components/schemas/AnalysisLinks"
+      type: object
+      required:
+        - id
+        - object
+        - workflow
+        - status
+        - createdAt
+        - links
+      title: AnalysisCreated
+      description: |-
+        An analysis that has been accepted. Follow it with `links.self`, or
+        wait for its webhook, then read `links.result`.
+    AnalysisDetail:
+      properties:
+        id:
+          type: string
+          description: "The analysis's id: `ana_` and a ULID."
+        object:
+          type: string
+          const: analysis
+          default: analysis
+        workflow:
+          type: string
+          description: The workflow the image runs through.
+        apiKeyId:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The key that submitted the analysis, or null when a user of the platform app did.
+        userId:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The platform app's user who submitted the analysis, or null when a key did.
+        metadata:
+          description: The `metadata` given at submission, as it was sent.
+        status:
+          $ref: "#/components/schemas/Status"
+          description: "`created` and `queued` before the analysis starts, `started` and `running` while it runs, then `succeeded`; `cancelled`, a domain outcome such as a photo without the calibration pad, named by `code`; or `failed`, a technical failure."
+        final:
+          type: boolean
+          description: Whether no status follows. A `failed` attempt that is retried is not final, so wait for the final status before treating an analysis as failed.
+        step:
+          anyOf:
+            - $ref: "#/components/schemas/Step"
+            - type: "null"
+          description: The step running, on a terminal status the last that ran; null before the first.
+        code:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: "Why the analysis was cancelled or failed: a domain code of the workflow, such as `no_markers` or `invalid_image`, or a technical code, such as `model_unavailable`."
+        reason:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: What `code` says, in words.
+        attempt:
+          type: integer
+          description: The attempt the status belongs to, from 1; 0 before the first.
+        maxAttempts:
+          anyOf:
+            - type: integer
+            - type: "null"
+          description: How many attempts the analysis may take, or null when not known.
+        fingerprint:
+          type: string
+          description: The version of the input the status belongs to; empty before it is queued.
+        queuedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+          description: When the analysis was queued.
+        startedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+          description: When its current attempt started.
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the status last changed.
+        finishedAt:
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+          description: When the analysis reached a terminal status.
+        result:
+          anyOf:
+            - $ref: "#/components/schemas/Result"
+            - type: "null"
+          description: Where the result of a succeeded analysis went; null otherwise.
+        transitions:
+          anyOf:
+            - items:
+                $ref: "#/components/schemas/AnalysisTransition"
+              type: array
+            - type: "null"
+          description: Every status it has had, oldest first; null for a moment after it is made, until the platform has recorded it.
+        stepDurationsMs:
+          anyOf:
+            - additionalProperties:
+                type: integer
+              type: object
+            - type: "null"
+          description: Milliseconds per step of the attempt that ended it; null until it has ended.
+      type: object
+      required:
+        - id
+        - object
+        - workflow
+        - apiKeyId
+        - userId
+        - metadata
+        - status
+        - final
+        - step
+        - code
+        - reason
+        - attempt
+        - maxAttempts
+        - fingerprint
+        - queuedAt
+        - startedAt
+        - updatedAt
+        - finishedAt
+        - result
+        - transitions
+        - stepDurationsMs
+      title: AnalysisDetail
+      description: |-
+        An analysis with its timeline: every change of its status in order,
+        and, once it has ended, how long each step of its last attempt took.
+    AnalysisEvent:
+      properties:
+        id:
+          type: string
+          pattern: ^whd_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The delivery's id, also in `X-Sauron-Delivery`; the same on every retry.
+          examples:
+            - whd_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+        type:
+          $ref: "#/components/schemas/EventType"
+        createdAt:
+          type: string
+          format: date-time
+          description: When the event happened.
+        data:
+          $ref: "#/components/schemas/Analysis"
+      type: object
+      required:
+        - id
+        - type
+        - createdAt
+        - data
+      title: AnalysisEvent
+      description: |-
+        An event of an analysis. Switch on `type`: a cancelled analysis is a
+        domain outcome, a failed one a technical failure.
+    AnalysisLinks:
+      properties:
+        self:
+          type: string
+          description: The analysis.
+          examples:
+            - /v1/analyses/ana_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+        result:
+          type: string
+          description: Its result.
+          examples:
+            - /v1/analyses/ana_01JQ8ZC5T4V7B9K2MNPQRSTWXZ/result
+      type: object
+      required:
+        - self
+        - result
+      title: AnalysisLinks
+      description: Where to follow an analysis, as paths of the API.
+    AnalysisList:
+      properties:
+        object:
+          type: string
+          const: list
+          default: list
+        data:
+          items:
+            $ref: "#/components/schemas/Analysis"
+          type: array
+        hasMore:
+          type: boolean
+          description: Whether more follow; ask for them with `startingAfter` the last id.
+      type: object
+      required:
+        - object
+        - data
+        - hasMore
+      title: AnalysisList
+      description: A page of analyses, newest first.
+    AnalysisResult:
+      properties:
+        id:
+          type: string
+          pattern: ^ana_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The analysis's id.
+          examples:
+            - ana_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+        object:
+          type: string
+          const: analysis_result
+          default: analysis_result
+        status:
+          $ref: "#/components/schemas/Status"
+          description: The analysis's status; `succeeded`, `cancelled` or `failed` once it has ended.
+        code:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: Why the analysis was cancelled or failed.
+          examples:
+            - no_markers
+        reason:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: What `code` says, in words.
+        result:
+          anyOf:
+            - $ref: "#/components/schemas/ResultManifest"
+            - type: "null"
+          description: The manifest of a succeeded analysis.
+        artifacts:
+          anyOf:
+            - additionalProperties:
+                $ref: "#/components/schemas/Artifact"
+              type: object
+            - type: "null"
+          description: "The files the manifest names, by name, each behind a signed URL. A result is its manifest: a workflow whose objects are vector data, such as `leaf_area_v1`, names no file, and this is empty."
+      type: object
+      required:
+        - id
+        - object
+        - status
+        - code
+        - reason
+        - result
+        - artifacts
+      title: AnalysisResult
+      description: |-
+        An analysis's result. While the analysis runs, only its status; once
+        it has ended, its outcome: the manifest of a succeeded analysis with its
+        files, or the code and reason of a cancelled or failed one. A cancelled
+        analysis is a domain outcome, such as a photo without the calibration
+        pad, and a result to handle like any other.
+    AnalysisTransition:
+      properties:
+        status:
+          $ref: "#/components/schemas/Status"
+        step:
+          anyOf:
+            - $ref: "#/components/schemas/Step"
+            - type: "null"
+          description: The step it was at; null before the first.
+        attempt:
+          type: integer
+          description: The attempt, from 1; 0 before the first.
+        code:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The code of a cancelled or failed status; null otherwise.
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the status changed.
+      type: object
+      required:
+        - status
+        - step
+        - attempt
+        - code
+        - updatedAt
+      title: AnalysisTransition
+      description: One change of an analysis's status, as the platform recorded it.
+    Artifact:
+      properties:
+        url:
+          type: string
+          format: uri
+          description: A signed URL that reads the file.
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the URL stops working, 15 minutes after it was made.
+      type: object
+      required:
+        - url
+        - expiresAt
+      title: Artifact
+      description: A file of the result, behind a signed URL.
+    Box:
+      properties:
+        x:
+          type: number
+          maximum: 1
+          minimum: 0
+          description: Its left edge.
+          examples:
+            - 0.12
+        y:
+          type: number
+          maximum: 1
+          minimum: 0
+          description: Its top edge.
+          examples:
+            - 0.3
+        width:
+          type: number
+          maximum: 1
+          minimum: 0
+          description: Its width.
+          examples:
+            - 0.2
+        height:
+          type: number
+          maximum: 1
+          minimum: 0
+          description: Its height.
+          examples:
+            - 0.18
+      additionalProperties: false
+      type: object
+      required:
+        - x
+        - y
+        - width
+        - height
+      title: Box
+      description: |-
+        A box, in fractions, 0 to 1, of the image's width and height as it
+        is shown upright, as a result's `bbox` is.
+    CreateAnalysis:
+      additionalProperties: false
+      description: An analysis to make of an upload.
+      properties:
+        uploadId:
+          description: The upload whose image to analyse; its PUT must have finished.
+          examples:
+            - upl_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+          pattern: ^upl_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          type: string
+        workflow:
+          description: "The workflow to run the image through: one of `GET /v1/workflows`."
+          examples:
+            - leaf_area_v1
+          maxLength: 64
+          minLength: 1
+          type: string
+        webhookUrl:
+          anyOf:
+            - maxLength: 2048
+              pattern: ^https://
+              type: string
+            - type: "null"
+          default: null
+          description: Where to POST the analysis's events, in place of the organisation's webhook endpoint. `https` only, and it must resolve to a public address.
+          format: uri
+        metadata:
+          anyOf:
+            - additionalProperties: {}
+              type: object
+            - type: "null"
+          default: null
+          description: Anything to keep with the analysis, up to 4096 bytes as JSON; returned as it was sent and never read.
+      required:
+        - uploadId
+        - workflow
+      title: CreateAnalysis
+      type: object
+    CreateAnalysisForm:
+      additionalProperties: false
+      description: |-
+        An analysis to make of an image sent in the request, for small
+        images; larger ones go through an upload.
+      properties:
+        image:
+          description: The image, in a type and size the workflow takes.
+          format: binary
+          type: string
+        workflow:
+          description: "The workflow to run the image through: one of `GET /v1/workflows`."
+          examples:
+            - leaf_area_v1
+          maxLength: 64
+          minLength: 1
+          type: string
+        webhookUrl:
+          anyOf:
+            - maxLength: 2048
+              pattern: ^https://
+              type: string
+            - type: "null"
+          default: null
+          description: Where to POST the analysis's events, in place of the organisation's webhook endpoint. `https` only, and it must resolve to a public address.
+          format: uri
+        metadata:
+          anyOf:
+            - type: string
+            - type: "null"
+          default: null
+          description: A JSON object as text. Anything to keep with the analysis, up to 4096 bytes as JSON; returned as it was sent and never read.
+      required:
+        - image
+        - workflow
+      title: CreateAnalysisForm
+      type: object
+    CreatePrediction:
+      additionalProperties: false
+      description: A prediction on an upload's image.
+      properties:
+        confThreshold:
+          anyOf:
+            - exclusiveMaximum: 1
+              exclusiveMinimum: 0
+              type: number
+            - type: "null"
+          default: null
+          description: A detector's or a segmenter's least score to report; the model's own by default.
+          examples:
+            - 0.25
+        maxDetections:
+          anyOf:
+            - maximum: 300
+              minimum: 1
+              type: integer
+            - type: "null"
+          default: null
+          description: At most this many detections, the highest scores first; 300 by default.
+          examples:
+            - 100
+        boxes:
+          anyOf:
+            - items:
+                $ref: "#/components/schemas/Box"
+              maxItems: 50
+              minItems: 1
+              type: array
+            - type: "null"
+          default: null
+          description: "For a model that outlines what it is given (`sam2-small`): the boxes to outline, such as a detector's. Required by such a model, refused by any other."
+        uploadId:
+          description: The upload whose image to predict on; its PUT must have finished.
+          examples:
+            - upl_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+          pattern: ^upl_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          type: string
+      required:
+        - uploadId
+      title: CreatePrediction
+      type: object
+    CreatePredictionForm:
+      additionalProperties: false
+      description: A prediction on an image sent in the request.
+      properties:
+        image:
+          description: "The image: JPEG or PNG, at most 20 MiB."
+          format: binary
+          type: string
+        confThreshold:
+          anyOf:
+            - exclusiveMaximum: 1
+              exclusiveMinimum: 0
+              type: number
+            - type: "null"
+          default: null
+          description: As in the JSON body.
+        maxDetections:
+          anyOf:
+            - maximum: 300
+              minimum: 1
+              type: integer
+            - type: "null"
+          default: null
+          description: As in the JSON body.
+        boxes:
+          anyOf:
+            - type: string
+            - type: "null"
+          default: null
+          description: The boxes, as JSON text; as in the JSON body.
+      required:
+        - image
+      title: CreatePredictionForm
+      type: object
+    CreateUpload:
+      properties:
+        contentType:
+          type: string
+          maxLength: 255
+          minLength: 1
+          description: The image's media type, which the PUT sends as its `Content-Type`.
+          examples:
+            - image/jpeg
+        sizeBytes:
+          type: integer
+          exclusiveMinimum: 0
+          description: The image's size in bytes, which the PUT sends exactly.
+      additionalProperties: false
+      type: object
+      required:
+        - contentType
+        - sizeBytes
+      title: CreateUpload
+      description: "An upload to make: the image the client will PUT."
+    DeletedAnalysis:
+      properties:
+        id:
+          type: string
+          pattern: ^ana_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: The analysis's id.
+          examples:
+            - ana_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+        object:
+          type: string
+          const: analysis
+          default: analysis
+        deleted:
+          type: boolean
+          const: true
+          default: true
+      type: object
+      required:
+        - id
+        - object
+        - deleted
+      title: DeletedAnalysis
+      description: An analysis whose image, result and status are being deleted.
+    Detection:
+      properties:
+        label:
+          type: string
+          description: What it is, one of the model's classes.
+          examples:
+            - leaf
+        classId:
+          type: integer
+          description: The class's index in the model, for a model with classes.
+          examples:
+            - 0
+        score:
+          type: number
+          description: The model's confidence, 0 to 1.
+          examples:
+            - 0.94
+        bbox:
+          $ref: "#/components/schemas/Box"
+        polygons:
+          items:
+            items:
+              $ref: "#/components/schemas/Point"
+            type: array
+          type: array
+          description: "Its outline, for a segmenter: one polygon per part, the largest first, in fractions."
+      type: object
+      required:
+        - label
+        - score
+        - bbox
+      title: Detection
+      description: |-
+        One thing the model found: its label, its score and where it is. A
+        score is the model's confidence, never a probability, and nothing is
+        measured: measurements are a workflow's.
+    EventType:
+      type: string
+      enum:
+        - analysis.started
+        - analysis.succeeded
+        - analysis.cancelled
+        - analysis.failed
+      title: EventType
+    Model:
+      properties:
+        id:
+          type: string
+          description: The model's id, its slug in the catalog.
+          examples:
+            - leaf-detector
+        object:
+          type: string
+          const: model
+          default: model
+        name:
+          type: string
+          description: The model's name.
+          examples:
+            - Leaf detector
+        description:
+          type: string
+          description: What the model does.
+          examples:
+            - Finds each leaf in a photo of leaves laid on the calibration pad, as a box around it.
+        source:
+          type: string
+          const: catalog
+          description: "`catalog`, one of Petiole's; an organisation's own models come later."
+          default: catalog
+        family:
+          type: string
+          description: "What serves it and reads its output: `yolo`, `sam2`, `sam`, `dino` or `learn`."
+          examples:
+            - yolo
+        task:
+          type: string
+          description: "What it does: `detect` (boxes), `segment` (outlines), `classify` or `embed` (features)."
+          examples:
+            - detect
+        runtime:
+          type: string
+          description: "The weights' format: `pt` or `onnx`."
+          examples:
+            - pt
+        version:
+          type: string
+          description: The weights it runs now, by name.
+          examples:
+            - leaf-v7-yolo26l
+        classes:
+          items:
+            type: string
+          type: array
+          description: What it finds, for a detector or a segmenter with classes; empty for one that outlines what it is given.
+          examples:
+            - - leaf
+        callable:
+          type: boolean
+          description: Whether `POST /v1/models/{id}/predictions` takes it; one that does not runs in its workflows only.
+          examples:
+            - true
+      type: object
+      required:
+        - id
+        - object
+        - name
+        - description
+        - source
+        - family
+        - task
+        - runtime
+        - version
+        - classes
+        - callable
+      title: Model
+      description: |-
+        A model: weights a model service runs, which the organisation's
+        workflows use. A model finds things, labels and geometry; a workflow
+        measures them, so a model's answer is never a result.
+    ModelDetail:
+      properties:
+        id:
+          type: string
+          description: The model's id, its slug in the catalog.
+          examples:
+            - leaf-detector
+        object:
+          type: string
+          const: model
+          default: model
+        name:
+          type: string
+          description: The model's name.
+          examples:
+            - Leaf detector
+        description:
+          type: string
+          description: What the model does.
+          examples:
+            - Finds each leaf in a photo of leaves laid on the calibration pad, as a box around it.
+        source:
+          type: string
+          const: catalog
+          description: "`catalog`, one of Petiole's; an organisation's own models come later."
+          default: catalog
+        family:
+          type: string
+          description: "What serves it and reads its output: `yolo`, `sam2`, `sam`, `dino` or `learn`."
+          examples:
+            - yolo
+        task:
+          type: string
+          description: "What it does: `detect` (boxes), `segment` (outlines), `classify` or `embed` (features)."
+          examples:
+            - detect
+        runtime:
+          type: string
+          description: "The weights' format: `pt` or `onnx`."
+          examples:
+            - pt
+        version:
+          type: string
+          description: The weights it runs now, by name.
+          examples:
+            - leaf-v7-yolo26l
+        classes:
+          items:
+            type: string
+          type: array
+          description: What it finds, for a detector or a segmenter with classes; empty for one that outlines what it is given.
+          examples:
+            - - leaf
+        callable:
+          type: boolean
+          description: Whether `POST /v1/models/{id}/predictions` takes it; one that does not runs in its workflows only.
+          examples:
+            - true
+        workflows:
+          items:
+            type: string
+          type: array
+          description: The ids of the organisation's workflows that run it.
+          examples:
+            - - leaf_area_v1
+      type: object
+      required:
+        - id
+        - object
+        - name
+        - description
+        - source
+        - family
+        - task
+        - runtime
+        - version
+        - classes
+        - callable
+        - workflows
+      title: ModelDetail
+      description: A model, and the organisation's workflows that use it.
+    ModelList:
+      properties:
+        object:
+          type: string
+          const: list
+          default: list
+        data:
+          items:
+            $ref: "#/components/schemas/Model"
+          type: array
+        hasMore:
+          type: boolean
+          description: Whether more follow; ask for them with `startingAfter` the last id.
+      type: object
+      required:
+        - object
+        - data
+        - hasMore
+      title: ModelList
+      description: The models the organisation's workflows use.
+    ModelStatus:
+      properties:
+        object:
+          type: string
+          const: model_status
+          default: model_status
+        model:
+          type: string
+          examples:
+            - leaf-detector
+        status:
+          type: string
+          enum:
+            - ready
+            - starting
+            - unavailable
+          description: "`ready` answers now; `starting` is waking, about a minute at most; `unavailable` cannot answer."
+        checkedAt:
+          type: string
+          format: date-time
+      type: object
+      required:
+        - object
+        - model
+        - status
+        - checkedAt
+      title: ModelStatus
+      description: |-
+        Whether a model can answer now (M14-T7). Asking wakes a model that
+        is not running.
+    ObjectType:
+      properties:
+        label:
+          type: string
+          examples:
+            - Leaf
+        pluralLabel:
+          type: string
+          examples:
+            - Leaves
+        description:
+          type: string
+        version:
+          type: integer
+          description: The object type's version; 1 when absent.
+          default: 1
+        includeProperties:
+          items:
+            type: string
+          type: array
+          description: Properties it takes from the registry's `propertyTemplates`.
+          examples:
+            - - bbox
+              - polygons
+        properties:
+          additionalProperties:
+            $ref: "#/components/schemas/PropertyDefinition"
+          type: object
+          description: Its own properties.
+      type: object
+      required:
+        - label
+        - pluralLabel
+        - description
+      title: ObjectType
+      description: "An object type: what a result's object of this type holds."
+    ObjectTypesRegistry:
+      properties:
+        version:
+          type: integer
+          description: The registry's version, a result's `objectTypesRegistryVersion`.
+          examples:
+            - 1
+        standardProperties:
+          items:
+            type: string
+          type: array
+          description: Properties any object type may carry.
+          examples:
+            - - mask
+              - cutout
+        propertyTemplates:
+          additionalProperties:
+            $ref: "#/components/schemas/PropertyDefinition"
+          type: object
+          description: Properties object types include by name.
+          examples:
+            - polygons:
+                label: Outline
+                type: geometry_multipolygon
+                valueShape: "[[{\"x\": number, \"y\": number}, ...], ...]: one polygon per part, the largest first, x and y as fractions of the frame's width and height"
+        objectTypes:
+          additionalProperties:
+            $ref: "#/components/schemas/ObjectType"
+          type: object
+          description: The object types by name.
+          examples:
+            - leaf:
+                description: A detected or measured individual leaf object.
+                includeProperties:
+                  - bbox
+                  - polygons
+                label: Leaf
+                pluralLabel: Leaves
+                properties:
+                  area_cm2:
+                    label: Area
+                    type: number
+                    unit: cm2
+                  perimeter_cm:
+                    label: Perimeter
+                    type: number
+                    unit: cm
+                  confidence:
+                    label: Detection confidence
+                    type: percentage
+                    unit: ratio
+                version: 2
+      type: object
+      required:
+        - version
+        - standardProperties
+        - propertyTemplates
+        - objectTypes
+      title: ObjectTypesRegistry
+      description: |-
+        The object-types registry: every object type a result can hold, with
+        its properties, their types and their units.
+    Point:
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+      type: object
+      required:
+        - x
+        - y
+      title: Point
+      description: A point, in fractions of the image's width and height.
+    Prediction:
+      properties:
+        object:
+          type: string
+          const: prediction
+          default: prediction
+        model:
+          $ref: "#/components/schemas/PredictionModel"
+        image:
+          $ref: "#/components/schemas/PredictionImage"
+        durationMs:
+          type: integer
+          description: How long the model took, in milliseconds.
+          examples:
+            - 640
+        detections:
+          items:
+            $ref: "#/components/schemas/Detection"
+          type: array
+          description: What it found, the highest scores first.
+      type: object
+      required:
+        - object
+        - model
+        - image
+        - durationMs
+        - detections
+      title: Prediction
+      description: What one model found in one image.
+    PredictionImage:
+      properties:
+        width:
+          type: integer
+          examples:
+            - 4032
+        height:
+          type: integer
+          examples:
+            - 3024
+      type: object
+      required:
+        - width
+        - height
+      title: PredictionImage
+      description: "The image as the model saw it: upright, in pixels."
+    PredictionModel:
+      properties:
+        id:
+          type: string
+          examples:
+            - leaf-detector
+        version:
+          type: string
+          examples:
+            - leaf-v7-yolo26l
+      type: object
+      required:
+        - id
+        - version
+      title: PredictionModel
+      description: The model a prediction ran, and the weights.
+    Problem:
+      description: |-
+        An error, as problem details (RFC 9457). `code` says which, and stays
+        the same when the wording of `title` and `detail` changes; `requestId` is
+        the request's, also in its `request-id` header.
+      properties:
+        type:
+          description: "A URI naming the problem: the documentation of its code."
+          examples:
+            - https://docs.petiole.pro/errors/not_found
+          format: uri
+          type: string
+        title:
+          description: What the code means, in words.
+          type: string
+        status:
+          description: The response's HTTP status.
+          examples:
+            - 404
+          type: integer
+        detail:
+          description: What went wrong with this request.
+          type: string
+        code:
+          description: "The error, one of a set that grows: a client that meets a code it does not know goes by the status."
+          examples:
+            - not_found
+          type: string
+          x-extensible-enum:
+            - invalid_request
+            - unknown_workflow
+            - authentication_required
+            - invalid_api_key
+            - key_expired
+            - invalid_session
+            - session_expired
+            - workflow_not_allowed
+            - organisation_suspended
+            - not_a_member
+            - user_required
+            - owner_required
+            - not_found
+            - method_not_allowed
+            - upload_incomplete
+            - analysis_not_ended
+            - model_not_callable
+            - idempotency_key_mismatch
+            - idempotency_key_in_use
+            - image_too_large
+            - unsupported_media_type
+            - image_type_not_allowed
+            - rate_limited
+            - quota_exceeded
+            - concurrency_limit_exceeded
+            - internal_error
+            - not_implemented
+            - service_unavailable
+            - model_starting
+        requestId:
+          description: The request's id.
+          examples:
+            - req_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+          type: string
+        errors:
+          description: "With `invalid_request`: every reason the request is not valid."
+          items:
+            $ref: "#/components/schemas/ProblemError"
+          type: array
+      required:
+        - type
+        - title
+        - status
+        - code
+        - requestId
+      title: Problem
+      type: object
+    ProblemError:
+      description: One reason a request is not valid.
+      properties:
+        detail:
+          description: What is wrong.
+          type: string
+        pointer:
+          description: Where in the JSON body, as a JSON Pointer (RFC 6901); absent for a parameter.
+          type: string
+        parameter:
+          description: The query, path or header parameter; absent for the body.
+          type: string
+      required:
+        - detail
+      title: ProblemError
+      type: object
+    PropertyDefinition:
+      properties:
+        label:
+          type: string
+          examples:
+            - Area
+        type:
+          type: string
+          description: "The value's type: `number`, `integer`, `percentage`, `boolean`, `string`, the geometry types `geometry_bbox`, `geometry_polygon` and `geometry_multipolygon`, or the media types `media_image` and `media_mask`."
+          examples:
+            - number
+        unit:
+          type: string
+          description: The value's unit, such as `cm2`, `cm` or `ratio`.
+          examples:
+            - cm2
+        min:
+          type: number
+          description: The smallest value.
+        max:
+          type: number
+          description: The largest value.
+        required:
+          type: boolean
+          description: Whether every object has the property.
+        nullable:
+          type: boolean
+          description: Whether the value may be null.
+        allowEmpty:
+          type: boolean
+          description: Whether a string may be empty.
+        allowedValues:
+          items: {}
+          type: array
+          description: The values a string may take.
+        valueShape:
+          type: string
+          description: The shape of a geometry value.
+        allowedMimeTypes:
+          items:
+            type: string
+          type: array
+          description: The file types of a media value.
+      type: object
+      required:
+        - label
+        - type
+      title: PropertyDefinition
+      description: A property of an object type.
+    Result:
+      properties:
+        sink:
+          type: string
+          description: "Where the result went: `bucket` for every analysis of the API."
+        resultRequestId:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The `spruce` sink's request, and absent for any other sink.
+        manifest:
+          anyOf:
+            - type: string
+            - type: "null"
+          description: The `bucket` sink's manifest. `GET /v1/analyses/{id}/result` returns it.
+      type: object
+      required:
+        - sink
+      title: Result
+      description: "Where a succeeded job's result went: the sink and its own key only."
+    ResultManifest:
+      properties:
+        payloadKind:
+          type: string
+          const: object_list
+          default: object_list
+        payloadVersion:
+          type: integer
+          description: The manifest's version; a breaking change makes a new one.
+          examples:
+            - 1
+        jobId:
+          type: string
+          description: The analysis's id.
+        processorKey:
+          type: string
+          description: The measurement that made the result.
+          examples:
+            - leaf_area
+        algorithmVersion:
+          type: string
+          description: The version of the measurement.
+          examples:
+            - 1.0.0
+        objectTypesRegistryVersion:
+          type: integer
+          description: The version of the object-types registry the objects follow.
+          examples:
+            - 1
+        objects:
+          items:
+            $ref: "#/components/schemas/ResultObject"
+          type: array
+      type: object
+      required:
+        - payloadKind
+        - payloadVersion
+        - jobId
+        - processorKey
+        - algorithmVersion
+        - objectTypesRegistryVersion
+        - objects
+      title: ResultManifest
+      description: |-
+        A result: the objects an analysis measured, in the object-types
+        registry's terms (`GET /v1/object-types`).
+    ResultObject:
+      properties:
+        objectType:
+          type: string
+          description: The object type, a key of the registry's `objectTypes`.
+          examples:
+            - leaf
+        objectTypeVersion:
+          type: integer
+          description: The version of the object type the properties follow.
+          examples:
+            - 2
+        objectId:
+          type: string
+          description: The object's id, unique within the result.
+        properties:
+          additionalProperties: {}
+          type: object
+          description: The object's properties, named and typed by its object type.
+          examples:
+            - area_cm2: 42.7
+              confidence: 0.98
+              perimeter_cm: 31.2
+      type: object
+      required:
+        - objectType
+        - objectTypeVersion
+        - objectId
+        - properties
+      title: ResultObject
+      description: |-
+        One object the analysis measured. Its properties, their units and
+        their shapes are those of `objectType` at `objectTypeVersion` in
+        `GET /v1/object-types`. Geometry, a `bbox` and every point of a
+        `polygon`, is in fractions, 0 to 1, of the width and height of the
+        submitted image as it is shown with its EXIF orientation applied, as a
+        browser shows it: draw the image at any size and scale each point to
+        it.
+    Status:
+      type: string
+      enum:
+        - created
+        - queued
+        - started
+        - running
+        - succeeded
+        - cancelled
+        - failed
+      title: Status
+    Step:
+      properties:
+        index:
+          type: integer
+          description: The step's position, from 1.
+        count:
+          type: integer
+          description: How many steps the workflow runs.
+        name:
+          type: string
+          description: The step's name in the workflow.
+      type: object
+      required:
+        - index
+        - count
+        - name
+      title: Step
+      description: 'The progress counter: "step 4 of 11".'
+    Upload:
+      properties:
+        id:
+          type: string
+          pattern: ^upl_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+          description: "The upload's id: `upl_` and a ULID."
+          examples:
+            - upl_01JQ8ZC5T4V7B9K2MNPQRSTWXZ
+        object:
+          type: string
+          const: upload
+          default: upload
+        url:
+          type: string
+          format: uri
+          description: The signed URL to PUT the image to.
+        headers:
+          additionalProperties:
+            type: string
+          type: object
+          description: The headers the PUT sends, exactly as given.
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the URL stops taking the PUT.
+      type: object
+      required:
+        - id
+        - object
+        - url
+        - headers
+        - expiresAt
+      title: Upload
+      description: |-
+        An upload: a signed URL to PUT one image to. The image is kept for a
+        day, and any number of analyses can be made of it in that time.
+    Usage:
+      properties:
+        object:
+          type: string
+          const: usage
+          default: usage
+        from:
+          type: string
+          format: date
+          description: The first day, in UTC.
+          examples:
+            - 2026-10-10
+        to:
+          type: string
+          format: date
+          description: The last day, in UTC.
+          examples:
+            - 2026-11-08
+        days:
+          items:
+            $ref: "#/components/schemas/UsageDay"
+          type: array
+      type: object
+      required:
+        - object
+        - from
+        - to
+        - days
+      title: Usage
+      description: |-
+        The API key's analyses that ended in a range of days, by day,
+        workflow and outcome.
+    UsageDay:
+      properties:
+        date:
+          type: string
+          format: date
+          description: The day, in UTC.
+          examples:
+            - 2026-11-08
+        workflow:
+          type: string
+          examples:
+            - leaf_area_v1
+        succeeded:
+          type: integer
+          examples:
+            - 42
+        cancelled:
+          type: integer
+          examples:
+            - 3
+        failed:
+          type: integer
+          examples:
+            - 0
+      type: object
+      required:
+        - date
+        - workflow
+        - succeeded
+        - cancelled
+        - failed
+      title: UsageDay
+      description: The analyses of one workflow that ended on one day, by outcome.
+    Workflow:
+      properties:
+        id:
+          type: string
+          description: The workflow's id, which names its version.
+          examples:
+            - leaf_area_v1
+        object:
+          type: string
+          const: workflow
+          default: workflow
+        name:
+          type: string
+          description: The workflow's name.
+          examples:
+            - Leaf area
+        description:
+          type: string
+          description: What the workflow measures.
+        inputs:
+          $ref: "#/components/schemas/WorkflowInputs"
+        objectTypes:
+          items:
+            type: string
+          type: array
+          description: The object types its results hold.
+          examples:
+            - - leaf
+        algorithmVersion:
+          type: string
+          description: The version of the measurement it runs now.
+          examples:
+            - 1.0.0
+      type: object
+      required:
+        - id
+        - object
+        - name
+        - description
+        - inputs
+        - objectTypes
+        - algorithmVersion
+      title: Workflow
+      description: "A workflow: one measurement an image can be run through."
+    WorkflowInputs:
+      properties:
+        mimeTypes:
+          items:
+            type: string
+          type: array
+          description: The image types it takes.
+          examples:
+            - - image/jpeg
+              - image/png
+              - image/heic
+        maxSizeBytes:
+          type: integer
+          description: The largest image it takes, in bytes.
+          examples:
+            - 20971520
+        requiresCalibrationPad:
+          type: boolean
+          description: Whether the photo must show the calibration pad.
+      type: object
+      required:
+        - mimeTypes
+        - maxSizeBytes
+        - requiresCalibrationPad
+      title: WorkflowInputs
+      description: What a workflow takes.
+    WorkflowList:
+      properties:
+        object:
+          type: string
+          const: list
+          default: list
+        data:
+          items:
+            $ref: "#/components/schemas/Workflow"
+          type: array
+        hasMore:
+          type: boolean
+          description: Whether more follow; ask for them with `startingAfter` the last id.
+      type: object
+      required:
+        - object
+        - data
+        - hasMore
+      title: WorkflowList
+      description: The workflows the API key may use.
+  securitySchemes:
+    apiKey:
+      type: http
+      description: "An API key, `ptl_live_` and then the secret on production, `ptl_test_` on staging, sent as `Authorization: Bearer <key>`. Keep it on a server: it is shown once, when it is made. A revoked or expired key gets `401`."
+      scheme: bearer
+      bearerFormat: ptl_live_… or ptl_test_…
+    user:
+      type: http
+      description: "A user's session of the platform app, the sign-in provider's short-lived JWT, sent by the app. Not for scripts: they take an API key."
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    BadRequest:
+      description: "The request is not valid: `invalid_request`, `unknown_workflow`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    Unauthorized:
+      description: "No valid API key or session: `authentication_required`, `invalid_api_key`, `key_expired`, `invalid_session`, `session_expired`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    Forbidden:
+      description: "The API key or the user may not do this: `workflow_not_allowed`, `organisation_suspended`, `not_a_member`, `user_required`, `owner_required`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    NotFound:
+      description: "No such resource, or not one of the organisation's: `not_found`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    Conflict:
+      description: "The request conflicts with the state of a resource: `upload_incomplete`, `analysis_not_ended`, `model_not_callable`, `idempotency_key_mismatch`, `idempotency_key_in_use`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    RequestEntityTooLarge:
+      description: "The image is larger than the workflow takes: `image_too_large`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    UnsupportedMediaType:
+      description: "The request's content type is not one this operation takes: `unsupported_media_type`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    UnprocessableEntity:
+      description: "The workflow does not take this type of image: `image_type_not_allowed`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    TooManyRequests:
+      description: "Too many requests or analyses; `Retry-After` says when to try again: `rate_limited`, `quota_exceeded`, `concurrency_limit_exceeded`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+    InternalServerError:
+      description: "An error on our side; quote the `requestId`: `internal_error`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+    ServiceUnavailable:
+      description: "A service the API depends on did not answer in time; nothing was done, and `Retry-After` says when to try again: `service_unavailable`, `model_starting`."
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+      headers:
+        request-id:
+          $ref: "#/components/headers/RequestId"
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+  headers:
+    RequestId:
+      description: "The request's id, `req_` and a ULID: quote it when asking about a request."
+      required: true
+      schema:
+        type: string
+        pattern: ^req_[0-7][0-9A-HJKMNP-TV-Z]{25}$
+    RateLimitLimit:
+      description: "How many requests the caller may make in a minute, all at once if it likes: with an API key, the key's limit or its organisation's, whichever is nearer used up; with a user's session, the organisation's."
+      schema:
+        type: integer
+    RateLimitRemaining:
+      description: How many it may make now. It refills evenly over the minute.
+      schema:
+        type: integer
+    RateLimitReset:
+      description: Seconds until it may make `RateLimit-Limit` requests again.
+      schema:
+        type: integer
+    RetryAfter:
+      description: Seconds to wait before trying again.
+      required: true
+      schema:
+        type: integer
+tags:
+  - name: Uploads
+    description: An image PUT to a signed URL, which analyses are made of.
+  - name: Analyses
+    description: "An image run through a workflow: its status, its result."
+  - name: Workflows
+    description: "What an image can be run through: the measurements of the catalog."
+  - name: Object types
+    description: What a result's objects hold.
+  - name: Models
+    description: "The models the workflows run: what each finds, and the weights it runs now. A model finds; a workflow measures."
+  - name: Usage
+    description: The analyses an API key has run.
+  - name: Webhooks
+    description: The events the API sends to an organisation's endpoint.

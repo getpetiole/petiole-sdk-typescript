@@ -1,0 +1,58 @@
+# release: a tag v<version> publishes @petiole/sdk of that version to npm
+# by trusted publishing (OpenID Connect, no token; npm signs its
+# provenance to this repository and run), unless it is on npm already, and
+# makes the tag's GitHub Release from CHANGELOG.md. The package's
+# prepublishOnly runs the types, the tests, the build and the browser
+# entry's check first. npm's trusted publisher for @petiole/sdk names this
+# repository and this file.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # the GitHub Release
+      id-token: write # trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # npm 11.5.1 or later publishes by trusted publishing.
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: The tag is the package's version
+        id: version
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [[ v$version != "$GITHUB_REF_NAME" ]]; then
+            echo "The tag $GITHUB_REF_NAME is not package.json's version, $version." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Publish, unless this version is on npm already
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if npm view "@petiole/sdk@$VERSION" version >/dev/null 2>&1; then
+            echo "@petiole/sdk@$VERSION is on npm already."
+          else
+            npm publish
+          fi
+      - name: The GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then exit 0; fi
+          awk -v heading="## $VERSION " 'index($0, heading) == 1 { found = 1; next } /^## / { found = 0 } found' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

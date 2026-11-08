@@ -1,0 +1,15 @@
+{
+  // The browser-safe entry, src/index.ts: built without Node's types, so a
+  // use of process, Buffer or a node: module fails the build. It runs in
+  // Node, browsers, Deno, Bun and edge runtimes on fetch and Web Crypto.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "types": []
+  },
+  "include": ["src"],
+  "exclude": ["src/node.ts"]
+}
