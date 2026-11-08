@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 (2026-11-08)
+
+- The package names its source, [getpetiole/petiole-sdk-typescript](https://github.com/getpetiole/petiole-sdk-typescript),
+  which publishes it from now on, with npm's provenance.
+- The README says where the source is and how to work on it.
+
+No change to the code.
+
 ## 0.1.0 (2026-11-08)
 
 The first version, on the API's v1 (`openapi.yaml` of 2026-11-08):
