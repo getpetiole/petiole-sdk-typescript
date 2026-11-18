@@ -122,7 +122,8 @@ ana_01M6YAZR69QA1YPGXJG6SX3XEC:leaf:det_001: 53.08 cm²
 ## Authentication
 
 The client reads your key from the `PETIOLE_API_KEY` environment variable,
-or you can pass it directly:
+or you can pass it directly, as you must on runtimes without `process.env`,
+such as some edge runtimes:
 
 ```ts
 const petiole = new Petiole({ apiKey: process.env.PETIOLE_API_KEY });
@@ -152,8 +153,8 @@ const petiole = new Petiole({ baseUrl: "https://api-staging.petiole.pro" });
   const petiole = new Petiole({ apiKey: null, baseUrl: "/api" }); // calls /api/v1/…
   ```
 
-- **Limiting exposure.** Each key has daily quotas, which cap the cost of a
-  leaked key. If a key is exposed, revoke it under **Keys & access**. A
+- **Limiting exposure.** Your organisation's daily quotas, and a key's own
+  limit if you give it one, cap the cost of a leaked key. If a key is exposed, revoke it under **Keys & access**. A
   revoked key stops working within a minute.
 
 ## Models
@@ -162,7 +163,7 @@ Models **detect** objects. They do not measure anything; measurements come
 from [workflows](#workflows-and-analyses).
 
 ```ts
-const { data } = await petiole.models.list();            // models your key can use
+const { data } = await petiole.models.list();            // models your key can see; callable: false ones run only in workflows
 const model = await petiole.models.get("leaf-detector");
 
 const prediction = await petiole.models.predict("leaf-detector", photo, {
@@ -184,8 +185,8 @@ To avoid the delay, wake the model early, for example when a user opens
 your upload screen:
 
 ```ts
-await petiole.models.status("leaf-detector");         // "ready", "starting" or "unavailable"; also wakes the model
-await petiole.models.waitUntilReady("leaf-detector"); // wakes the model and waits until it is ready
+const { status } = await petiole.models.status("leaf-detector"); // "ready", "starting" or "unavailable"; also wakes the model
+await petiole.models.waitUntilReady("leaf-detector");            // wakes the model and waits until it is ready
 ```
 
 ## Workflows and analyses
@@ -203,7 +204,7 @@ An analysis can end in one of three states:
 | --- | --- | --- |
 | `succeeded` | The image was measured. | The result contains `objects`. |
 | `cancelled` | The image could not be measured, for example `no_markers` when the calibration pad is not visible. | Returned as a normal result with a `code` and `reason`. |
-| `failed` | A technical error occurred. | Throws `AnalysisFailedError`. |
+| `failed` | A technical error occurred. | `petiole.analyze()` throws `AnalysisFailedError`; `analyses.wait()` and `analyses.result()` return it with a `code` and `reason`. |
 
 ### Step-by-step control
 
@@ -279,20 +280,22 @@ export async function POST(request: Request): Promise<Response> {
 ```
 
 - **Replay protection.** Signatures older than five minutes are rejected.
-- **At-least-once delivery.** Deliveries are retried until your endpoint
-  returns a 2xx response, so the same event may arrive more than once. Use
+- **At-least-once delivery.** A delivery that gets no 2xx response is
+  retried with backoff for 24 hours, so the same event may arrive more than
+  once. Use
   the event `id` to skip duplicates.
 - **Rotating secrets.** During a rotation, pass both secrets:
   `secret: [oldSecret, newSecret]`.
 
 ## Error handling
 
-All errors thrown by the SDK extend `PetioleError`.
+All errors thrown by the SDK extend `PetioleError`. A call cancelled with an
+`AbortSignal` rejects with the signal's reason instead.
 
 | Error | Thrown when |
 | --- | --- |
 | `ApiError` | The API returned an error. Includes `status`, `code` (e.g. `not_found`, `quota_exceeded`), `detail`, `requestId` and, for `invalid_request`, field-level `errors`. |
-| `AnalysisFailedError` | An analysis ended with status `failed` (a technical failure). |
+| `AnalysisFailedError` | An analysis run by `petiole.analyze()` ended with status `failed` (a technical failure). |
 | `ConnectionError` | The API could not be reached. |
 | `TimeoutError` | A request or wait exceeded its time limit. |
 | `UploadError` | An upload to the signed URL was rejected. |
@@ -321,11 +324,15 @@ be added over time, so handle unknown codes by their HTTP `status`.
   analysis. To safely repeat a call yourself, pass your own
   `{ idempotencyKey }`; it is honoured for 24 hours.
 - **Automatic retries.** Failed connections, timeouts, `rate_limited`,
-  `service_unavailable` and `internal_error` are retried twice by default
-  (`maxRetries`). `quota_exceeded` (which resets at midnight UTC) and
-  `concurrency_limit_exceeded` are never retried.
-- **Timeouts.** Each attempt may take up to 90 seconds (`timeoutMs`). The API
-  itself responds within 60 seconds.
+  `service_unavailable`, `internal_error`, `idempotency_key_in_use` and bare
+  408, 502, 503 and 504 responses are retried twice by default
+  (`maxRetries`). A `Retry-After` of up to 60 seconds is waited for; a longer
+  one is thrown at once. `quota_exceeded` (which resets at midnight UTC) and
+  `concurrency_limit_exceeded` are never retried. A model that is starting
+  is waited for separately, up to `maxWaitMs`.
+- **Timeouts.** Each API request attempt may take up to 90 seconds
+  (`timeoutMs`), and an upload to its signed URL at least 300 seconds. The
+  API itself responds within 60 seconds.
 - **Cancellation.** Every method accepts an `AbortSignal`, which cancels the
   request together with any pending retries and waits.
 
@@ -386,8 +393,9 @@ privately as described in our
 
 The source code is at
 [getpetiole/petiole-sdk-typescript](https://github.com/getpetiole/petiole-sdk-typescript).
-It is published from Petiole's platform repository at each release, where
-it is generated from the API specification and tested against the API.
+It is copied from Petiole's platform repository at each release, where it is
+generated from the API specification and tested against the API, and
+published to npm from here.
 Issues and pull requests are welcome; merged changes are included in the
 next release.
 
