@@ -1,0 +1,5 @@
+# Text files are LF in every checkout, Windows included, whatever the
+# contributor's core.autocrlf: the README test compares the README's
+# quickstart with examples/quickstart.mjs, and `npm run generate` compares
+# src/generated with what orval writes, both byte for byte.
+* text=auto eol=lf
