@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 (2026-11-18)
+
+- A new README: an overview, quick start, authentication, error handling,
+  webhooks, versioning, security and a section for organisations.
+
+No change to the code.
+
 ## 0.1.1 (2026-11-08)
 
 - The package names its source, [getpetiole/petiole-sdk-typescript](https://github.com/getpetiole/petiole-sdk-typescript),
